@@ -1,5 +1,4 @@
-<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
-<title>سورة القصص</title>
+<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style></head><body><title>سورة القصص</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -784,7 +783,65 @@ $("startSolo").onclick = ()=> startQuiz(Math.floor(Math.random()*1e9), soloKind,
 
 /* ---------- group mode (live room) ---------- */
 const G = {room:null, sub:null, joined:false, host:false, code:null, name:"", started:false, peers:[]};
-const roomCap = (window.claude && claude.use) ? claude.use("room").catch(()=>null) : Promise.resolve(null);
+/* Two ways to connect players:
+   1) inside Claude: the platform's live room;
+   2) anywhere else (GitHub Pages, etc.): a free public MQTT server — no accounts needed. */
+const MQ_URLS = window.QQ_BROKERS || ["wss://broker.hivemq.com:8884/mqtt", "wss://broker.emqx.io:8084/mqtt"];
+const MQ_LIB = window.QQ_MQTT_LIB || "https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js";
+const MQ_NS = "jojo-quran/qasas-v1/";
+function loadMqtt(){
+  if(window.mqtt) return Promise.resolve(window.mqtt);
+  return new Promise((res,rej)=>{ const sc=document.createElement("script"); sc.src=MQ_LIB; sc.onload=()=>res(window.mqtt); sc.onerror=rej; document.head.append(sc); });
+}
+function mqConnect(lib, url, opts){
+  return new Promise((res,rej)=>{
+    const c = lib.connect(url, opts);
+    const t = setTimeout(()=>{ c.end(true); rej(new Error("timeout")); }, 8000);
+    c.once("connect", ()=>{ clearTimeout(t); res(c); });
+    c.once("error", e=>{ clearTimeout(t); c.end(true); rej(e); });
+  });
+}
+const MqttLobby = {
+  async join(name){
+    const lib = await loadMqtt();
+    const id = "p" + Math.random().toString(36).slice(2,10);
+    const base = MQ_NS + name + "/p/";
+    let client = null, lastErr = null;
+    for(const u of MQ_URLS){
+      try{ client = await mqConnect(lib, u, {clientId:"qq_"+id, clean:true, keepalive:30, reconnectPeriod:3000, connectTimeout:8000,
+        will:{topic:base+id, payload:"", retain:true, qos:1}}); break; }
+      catch(e){ lastErr = e; }
+    }
+    if(!client) throw lastErr || new Error("no server");
+    const peers = new Map(); let mine = {}, subs = [];
+    const alive = ([k,v]) => k===id || Date.now()-v.seen < 60000;
+    const snap = ()=> [...peers.entries()].filter(alive).map(([k,v])=>({peer:k, kind:"viewer", presence:v.p, isMe:k===id, sameTab:k===id, guest:false}));
+    const fire = ()=>{ const ps = snap(); subs.forEach(f=>f({peers:ps})); };
+    client.on("message", (topic, buf, packet)=>{
+      const k = topic.slice(base.length); if(k===id) return;
+      const txt = buf.toString();
+      if(!txt){ peers.delete(k); fire(); return; }
+      try{ const p = JSON.parse(txt); if(p && typeof p==="object" && typeof p.nm==="string"){
+        p.nm = p.nm.slice(0,20);
+        peers.set(k, {p, seen: packet && packet.retain ? (+p.t||0) : Date.now()}); }
+      }catch(e){}
+      fire();
+    });
+    await new Promise((res,rej)=> client.subscribe(base+"+", {qos:1}, e=> e?rej(e):res()));
+    const pub = ()=> client.publish(base+id, JSON.stringify({...mine, t:Date.now()}), {retain:true, qos:1});
+    const hb = setInterval(()=>{ pub(); fire(); }, 20000);
+    return {
+      presence(patch){ for(const k in patch){ if(patch[k]===null) delete mine[k]; else mine[k]=patch[k]; }
+        peers.set(id, {p:{...mine}, seen:Date.now()}); pub(); fire(); return Promise.resolve(); },
+      onPeers(cb){ subs.push(cb); setTimeout(()=>cb({peers:snap()}), 0); return ()=>{ subs = subs.filter(f=>f!==cb); }; },
+      leave(){ clearInterval(hb); subs = []; try{ client.publish(base+id, "", {retain:true, qos:1}, ()=>client.end()); }catch(e){} }
+    };
+  }
+};
+const roomCap = (async ()=>{
+  if(window.claude && claude.use){ const r = await claude.use("room").catch(()=>null); if(r) return r; }
+  return MqttLobby;
+})();
 $("pName").value = store("qasas-name") || "";
 
 function cleanName(){ return ($("pName").value||"").trim().slice(0,20); }
@@ -794,10 +851,16 @@ async function enterRoom(code, asHost){
   if(!name){ err.textContent = "اكتب اسمك الأول عشان أهلك يعرفوك 😊"; $("pName").focus(); return; }
   store("qasas-name", name);
   const lobby = await roomCap;
-  if(!lobby){ err.textContent = "المسابقة الجماعية محتاجة كل واحد يفتح نفس الرابط وهو مسجّل دخول في Claude. لو مش متاح دلوقتي، جرّب الأسئلة لوحدك."; return; }
   let r;
+  err.textContent = "⏳ بنوصّل…";
   try { r = await lobby.join("q28-"+code); }
-  catch(e){ err.textContent = "مش قادرين ندخل الغرفة دلوقتي. اتأكد من النت وجرّب تاني."; return; }
+  catch(e){ err.textContent = "مش قادرين نوصل لسيرفر المسابقة. اتأكد إن النت شغال وجرّب تاني بعد شوية. وممكن تلعب الأسئلة لوحدك لحد ما النت يرجع."; return; }
+  err.textContent = "";
+  if(asHost && lobby===MqttLobby){
+    // make sure nobody else is already using this code
+    const taken = await new Promise(res=>{ let un=null; un = r.onPeers(ch=>{ if(ch.peers.some(p=>!p.isMe && p.presence.role==="host")){ un&&un(); res(true); } }); setTimeout(()=>{ un&&un(); res(false); }, 1500); });
+    if(taken){ r.leave(); return enterRoom(String(Math.floor(1000+Math.random()*9000)), true); }
+  }
   Object.assign(G, {room:r, joined:true, host:asHost, code, name, started:false});
   await r.presence({nm:name, role:asHost?"host":"player", st:"lobby", sc:0, qi:0, ok:0, seed:asHost?Math.floor(Math.random()*1e9):null}).catch(()=>{});
   G.sub = r.onPeers(ch=>{ G.peers = ch.peers.filter(p=>p.kind==="viewer" && p.presence && p.presence.nm); onRoomChange(); },
@@ -805,7 +868,11 @@ async function enterRoom(code, asHost){
   $("lobbyCode").textContent = code;
   go("lobby");
   onRoomChange();
-  if(!asHost) setTimeout(()=>{ if(G.joined && G.peers.length>11){ leaveRoom(); $("groupErr").textContent="الغرفة دي اتملت (١١ لاعب). اطلب كود تاني."; } }, 2500);
+  if(!asHost) setTimeout(()=>{
+    if(!G.joined) return;
+    if(G.peers.length>11){ leaveRoom(); $("groupErr").textContent="الغرفة دي اتملت (١١ لاعب). اطلب كود تاني."; }
+    else if(!hostPeer()){ leaveRoom(); $("groupErr").textContent="مفيش مسابقة بالكود ده دلوقتي. اتأكد من الأرقام، أو اطلب من صاحب الكود يعمل كود جديد."; }
+  }, 3500);
 }
 function leaveRoom(){
   if(G.sub) G.sub();
@@ -896,5 +963,4 @@ $("copyCode").onclick = async ()=>{
   catch(e){ const r=document.createRange(); r.selectNodeContents($("lobbyCode")); const s=getSelection(); s.removeAllRanges(); s.addRange(r); b.lastChild.textContent="اضغط نسخ من القائمة"; }
 };
 </script>
-
 </body></html>
