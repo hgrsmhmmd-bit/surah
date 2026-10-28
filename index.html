@@ -744,6 +744,7 @@ function showResult(){
   s.append(el("p","muted", c===n ? "حفظك ثابت، جرّب نوع تاني من الأسئلة." : "ارجع للقصة، وبعدين جرّب تاني؛ كل مرة هتلاقي أسئلة مختلفة."));
   if(Q.group){
     s.append(el("h3",null,"ترتيب المسابقة"));
+    s.append(el("p","muted","النقط: ١٠ لكل إجابة صح، وممكن لحد ٥ نقط زيادة لو جاوبت بسرعة. الإجابة الغلط مالهاش نقط. والترتيب بيتحدّث لحظة بلحظة لحد ما الكل يخلّص."));
     const b = el("div","board"); b.id = "finalBoard"; s.append(b);
     renderBoards();
   }
@@ -804,11 +805,11 @@ function mqConnect(lib, url, opts){
 const MqttLobby = {
   async join(name){
     const lib = await loadMqtt();
-    const id = "p" + Math.random().toString(36).slice(2,10);
+    let id = store("qq-dev"); if(!id){ id = "d" + Math.random().toString(36).slice(2,10); store("qq-dev", id); }
     const base = MQ_NS + name + "/p/";
     let client = null, lastErr = null;
     for(const u of MQ_URLS){
-      try{ client = await mqConnect(lib, u, {clientId:"qq_"+id, clean:true, keepalive:30, reconnectPeriod:3000, connectTimeout:8000,
+      try{ client = await mqConnect(lib, u, {clientId:"qq_"+id+"_"+Math.random().toString(36).slice(2,6), clean:true, keepalive:30, reconnectPeriod:3000, connectTimeout:8000,
         will:{topic:base+id, payload:"", retain:true, qos:1}}); break; }
       catch(e){ lastErr = e; }
     }
@@ -899,10 +900,12 @@ function syncPresence(){
   if(!G.room || !Q || !Q.group) return;
   G.room.presence({st: Q.done ? "done":"playing", sc:Q.score, ok:Q.correct, qi:Math.min(Q.i+1, Q.qs.length), ms:Q.ms||null}).catch(()=>{});
 }
+window.addEventListener("pagehide", ()=>{ if(G.room && G.room.leave) G.room.leave(); });
+const started = p => p.presence.st==="playing" || p.presence.st==="done";
 function ranked(){
   return G.peers.slice().sort((a,b)=>{
     const A=a.presence,B=b.presence;
-    return (B.sc||0)-(A.sc||0) || ((A.ms||9e9)-(B.ms||9e9));
+    return (started(b)-started(a)) || (B.sc||0)-(A.sc||0) || ((A.ms||9e9)-(B.ms||9e9));
   });
 }
 function renderBoards(){
@@ -923,7 +926,8 @@ function renderBoards(){
   if(Q && Q.group && !$("s-quiz").hidden){
     mini.replaceChildren();
     ranked().forEach((p,i)=>{
-      const s = el("span", p.isMe&&p.sameTab?"me":null, (i===0?"🥇 ":"")+p.presence.nm+" · "+ar(p.presence.sc||0));
+      const P = p.presence, prog = P.st==="done" ? " ✅" : started(p) ? " (س"+ar(P.qi||1)+")" : " ⏳";
+      const s = el("span", p.isMe&&p.sameTab?"me":null, (i===0&&started(p)?"🥇 ":"")+P.nm+" · "+ar(P.sc||0)+prog);
       mini.append(s);
     });
   }
@@ -932,13 +936,17 @@ function renderBoards(){
   if(fin){
     fin.replaceChildren();
     const medals=["🥇","🥈","🥉"];
+    const n = Q ? Q.qs.length : 10;
     ranked().forEach((p,i)=>{
       const P = p.presence;
       const row = el("div","player"+(p.isMe&&p.sameTab?" me":""));
-      row.append(el("span","pos", medals[i]||ar(i+1)));
+      row.append(el("span","pos", started(p) ? (medals[i]||ar(i+1)) : "⏳"));
       const nm = el("span","nm", P.nm + (p.isMe&&p.sameTab?" (أنت)":""));
-      nm.append(el("span","st", P.st==="done" ? "خلّص · "+ar(P.ok||0)+" صح" : "لسه بيجاوب · سؤال "+ar(P.qi||1)));
-      row.append(nm, el("span","pts", ar(P.sc||0)));
+      nm.append(el("span","st",
+        P.st==="done" ? "خلّص · "+ar(P.ok||0)+" صح من "+ar(n)
+        : P.st==="playing" ? "لسه بيجاوب · وصل لسؤال "+ar(P.qi||1)+" من "+ar(n)
+        : "لسه ما بدأش الأسئلة"));
+      row.append(nm, el("span","pts", started(p) ? ar(P.sc||0)+" نقطة" : "—"));
       fin.append(row);
     });
   }
